@@ -1,8 +1,13 @@
 import boto3
+import re
+
 from botocore.exceptions import ClientError
 from rich.console import Console
 
 console = Console()
+
+def get_arn_pattern(resource):
+    return rf'^arn:aws:iam::[0-9]{{12}}:{resource}/[a-zA-Z0-9-_]+$'
 
 def delete_lambda_function(resource_id):
     client = boto3.client('lambda')
@@ -14,6 +19,10 @@ def delete_lambda_function(resource_id):
 
 def delete_iam_role(resource_id):
     client = boto3.client('iam')
+
+    if len(resource_id) > 64:
+        return f"Invalid role name length: {resource_id}. Role name must be 64 characters or fewer."
+
     try:
         client.delete_role(RoleName=resource_id)
         console.print(f"[green]Successfully deleted IAM role {resource_id}[/green]")
@@ -24,6 +33,11 @@ def delete_iam_role(resource_id):
 
 def delete_iam_policy(resource_id):
     client = boto3.client('iam')
+
+    arn_pattern = get_arn_pattern('policy')
+    if not re.match(arn_pattern, resource_id):
+        return f"Invalid ARN format: {resource_id}"
+
     try:
         client.delete_policy(PolicyArn=resource_id)
         console.print(f"[green]Successfully deleted IAM policy {resource_id}[/green]")
