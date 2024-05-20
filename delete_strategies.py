@@ -6,6 +6,9 @@ from rich.console import Console
 
 console = Console()
 
+placeholder_cache_policy_id = '658327ea-f89d-4fab-a63d-7e88639e58f6'  # Replace this with your default/placeholder cache policy ID
+
+
 def get_arn_pattern(resource):
     return rf'^arn:aws:iam::[0-9]{{12}}:{resource}/[a-zA-Z0-9-_]+$'
 
@@ -110,13 +113,39 @@ def delete_dynamodb_table(resource_id):
     except ClientError as e:
         return f"Error deleting DynamoDB Table {resource_id}: {e}"
 
-def delete_ec2_security_group(resource_id):
+def delete_ec2_security_group(resource_arn):
     client = boto3.client('ec2')
+    group_id = resource_arn.split('/')[-1]
+
     try:
-        client.delete_security_group(GroupId=resource_id)
-        console.print(f"[green]Successfully deleted EC2 Security Group {resource_id}[/green]")
+        # Detach any network interfaces associated with the security group
+        network_interfaces = client.describe_network_interfaces(Filters=[{'Name': 'group-id', 'Values': [group_id]}])
+        for ni in network_interfaces['NetworkInterfaces']:
+            client.modify_network_interface_attribute(
+                NetworkInterfaceId=ni['NetworkInterfaceId'],
+                Groups=[]
+            )
+
+        # Remove the security group from any running instances
+        instances = client.describe_instances(Filters=[{'Name': 'instance.group-id', 'Values': [group_id]}])
+        for reservation in instances['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+                existing_groups = [g['GroupId'] for g in instance['SecurityGroups'] if g['GroupId'] != group_id]
+                client.modify_instance_attribute(
+                    InstanceId=instance_id,
+                    Groups=existing_groups
+                )
+
+        # Delete any associated rules (this is typically not needed, but included for completeness)
+        client.revoke_security_group_ingress(GroupId=group_id, IpPermissions=[])
+        client.revoke_security_group_egress(GroupId=group_id, IpPermissions=[])
+
+        # Finally, delete the security group
+        client.delete_security_group(GroupId=group_id)
+        console.print(f"[green]Successfully deleted EC2 Security Group {group_id}[/green]")
     except ClientError as e:
-        return f"Error deleting EC2 Security Group {resource_id}: {e}"
+        return f"Error deleting EC2 Security Group {group_id}: {e}"
 
 def delete_cloudfront_function(resource_id):
     client = boto3.client('cloudfront')
@@ -220,7 +249,45 @@ def delete_subnet(resource_arn):
     subnet_id = resource_arn.split('/')[-1]
 
     try:
-        # Delete the subnet
+        # Detach and delete any network interfaces associated with the subnet
+        network_interfaces = client.describe_network_interfaces(Filters=[{'Name': 'subnet-id', 'Values': [subnet_id]}])
+        for ni in network_interfaces['NetworkInterfaces']:
+            client.delete_network_interface(NetworkInterfaceId=ni['NetworkInterfaceId'])
+
+        # Terminate any instances in the subnet
+        instances = client.describe_instances(Filters=[{'Name': 'subnet-id', 'Values': [subnet_id]}])
+        instance_ids = [instance['InstanceId'] for reservation in instances['Reservations'] for instance in reservation['Instances']]
+        if instance_ids:
+            client.terminate_instances(InstanceIds=instance_ids)
+            waiter = client.get_waiter('instance_terminated')
+            waiter.wait(InstanceIds=instance_ids)
+
+        # Detach any load balancers from the subnet (ELBv2)
+        elb_client = boto3.client('elbv2')
+        load_balancers = elb_client.describe_load_balancers()
+        for lb in load_balancers['LoadBalancers']:
+            if lb['VpcId'] == subnet_id:
+                elb_client.delete_load_balancer(LoadBalancerArn=lb['LoadBalancerArn'])
+
+        # Disassociate and delete any route tables associated with the subnet
+        route_tables = client.describe_route_tables(Filters=[{'Name': 'association.subnet-id', 'Values': [subnet_id]}])
+        for rt in route_tables['RouteTables']:
+            for association in rt['Associations']:
+                if not association['Main']:
+                    client.disassociate_route_table(AssociationId=association['RouteTableAssociationId'])
+                    client.delete_route_table(RouteTableId=rt['RouteTableId'])
+
+        # Disassociate any network ACLs associated with the subnet
+        network_acls = client.describe_network_acls(Filters=[{'Name': 'association.subnet-id', 'Values': [subnet_id]}])
+        for acl in network_acls['NetworkAcls']:
+            for association in acl['Associations']:
+                if association['SubnetId'] == subnet_id:
+                    client.replace_network_acl_association(
+                        AssociationId=association['NetworkAclAssociationId'],
+                        NetworkAclId=acl['DefaultNetworkAclId']
+                    )
+
+        # Finally, delete the subnet
         client.delete_subnet(SubnetId=subnet_id)
         console.print(f"[green]Successfully deleted EC2 Subnet {subnet_id}[/green]")
     except ClientError as e:
@@ -236,3 +303,51 @@ def delete_nat_gateway(resource_arn):
         console.print(f"[green]Successfully deleted EC2 NAT Gateway {nat_gateway_id}[/green]")
     except ClientError as e:
         return f"Error deleting EC2 NAT Gateway {nat_gateway_id}: {e}"
+
+def delete_cloudfront_cache_policy(resource_arn):
+    client = boto3.client('cloudfront')
+    cache_policy_id = resource_arn.split('/')[-1]
+
+    try:
+        # Get the list of distributions
+        distributions = client.list_distributions()
+
+        for distribution in distributions.get('DistributionList', {}).get('Items', []):
+            dist_id = distribution['Id']
+            dist_response = client.get_distribution_config(Id=dist_id)
+            etag = dist_response['ETag']
+            distribution_config = dist_response['DistributionConfig']
+
+            # Check and update cache behaviors
+            modified = False
+            cache_behaviors = distribution_config.get('CacheBehaviors', {}).get('Items', [])
+            for cache_behavior in cache_behaviors:
+                if cache_behavior.get('CachePolicyId') == cache_policy_id:
+                    cache_behavior['CachePolicyId'] = placeholder_cache_policy_id
+                    modified = True
+
+            default_cache_behavior = distribution_config.get('DefaultCacheBehavior', {})
+            if default_cache_behavior.get('CachePolicyId') == cache_policy_id:
+                default_cache_behavior['CachePolicyId'] = placeholder_cache_policy_id
+                modified = True
+
+            # Update the distribution if any modifications were made
+            if modified:
+                client.update_distribution(
+                    Id=dist_id,
+                    IfMatch=etag,
+                    DistributionConfig=distribution_config
+                )
+                client.get_waiter('distribution_deployed').wait(Id=dist_id)
+
+        # Get the cache policy's current configuration and ETag
+        response = client.get_cache_policy(Id=cache_policy_id)
+        etag = response['ETag']
+
+        # Delete the cache policy
+        client.delete_cache_policy(Id=cache_policy_id, IfMatch=etag)
+        console.print(f"[green]Successfully deleted CloudFront Cache Policy {cache_policy_id}[/green]")
+    except ClientError as e:
+        return f"Error deleting CloudFront Cache Policy {cache_policy_id}: {e}"
+    except KeyError as e:
+        return f"Error processing CloudFront Cache Policy {cache_policy_id}: Missing key {e}"
