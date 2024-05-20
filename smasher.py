@@ -10,7 +10,8 @@ from delete_strategies import (
     delete_cloudwatch_log_resource_policy, delete_log_group, delete_events_rule,
     delete_ssm_parameter, delete_sqs_queue, delete_events_event_bus,
     delete_log_retention, delete_dynamodb_table, delete_ec2_security_group,
-    delete_cloudfront_function, delete_lambda_layer_version, delete_cloudfront_distribution
+    delete_cloudfront_function, delete_lambda_layer_version, delete_cloudfront_distribution,
+    delete_vpc, delete_subnet, delete_nat_gateway
 )
 from custom_strategies import (
     delete_sourcemap_uploader,
@@ -114,9 +115,15 @@ def delete_resource(resource_type, resource_id):
         elif resource_type == 'AWS::CloudFront::Function':
             error = delete_cloudfront_function(resource_id)
         elif resource_type == 'AWS::Lambda::LayerVersion':
-                error = delete_lambda_layer_version(resource_id)
+            error = delete_lambda_layer_version(resource_id)
         elif resource_type == 'AWS::CloudFront::Distribution':
-                error = delete_cloudfront_distribution(resource_id)
+            error = delete_cloudfront_distribution(resource_id)
+        elif resource_type == 'AWS::EC2::VPC':
+            error = delete_vpc(resource_id)
+        elif resource_type == 'AWS::EC2::Subnet':
+            error = delete_subnet(resource_id)
+        elif resource_type == 'AWS::EC2::NatGateway':
+            error = delete_nat_gateway(resource_id)
         else:
             console.print(f"\n[bold red]Unsupported or unknown resource type {resource_type} for resource {resource_id}[/bold red]")
             raise typer.Exit(code=1)

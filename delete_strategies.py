@@ -174,3 +174,65 @@ def delete_lambda_layer_version(resource_id):
         console.print(f"[green]Successfully deleted Lambda Layer Version {resource_id}[/green]")
     except ClientError as e:
         return f"Error deleting Lambda Layer Version {resource_id}: {e}"
+
+def delete_vpc(resource_arn):
+    client = boto3.client('ec2')
+    vpc_id = resource_arn.split('/')[-1]
+
+    try:
+        # Detach and delete any internet gateways attached to the VPC
+        igw_response = client.describe_internet_gateways(Filters=[{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}])
+        for igw in igw_response['InternetGateways']:
+            client.detach_internet_gateway(InternetGatewayId=igw['InternetGatewayId'], VpcId=vpc_id)
+            client.delete_internet_gateway(InternetGatewayId=igw['InternetGatewayId'])
+
+        # Delete any subnets associated with the VPC
+        subnets_response = client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+        for subnet in subnets_response['Subnets']:
+            client.delete_subnet(SubnetId=subnet['SubnetId'])
+
+        # Delete any route tables associated with the VPC, excluding the main route table
+        rt_response = client.describe_route_tables(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+        for rt in rt_response['RouteTables']:
+            if not rt['Associations'][0]['Main']:
+                client.delete_route_table(RouteTableId=rt['RouteTableId'])
+
+        # Delete any network ACLs associated with the VPC, excluding the default network ACL
+        acl_response = client.describe_network_acls(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+        for acl in acl_response['NetworkAcls']:
+            if not acl['IsDefault']:
+                client.delete_network_acl(NetworkAclId=acl['NetworkAclId'])
+
+        # Delete any security groups associated with the VPC, excluding the default security group
+        sg_response = client.describe_security_groups(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+        for sg in sg_response['SecurityGroups']:
+            if sg['GroupName'] != 'default':
+                client.delete_security_group(GroupId=sg['GroupId'])
+
+        # Finally, delete the VPC
+        client.delete_vpc(VpcId=vpc_id)
+        console.print(f"[green]Successfully deleted VPC {vpc_id}[/green]")
+    except ClientError as e:
+        return f"Error deleting VPC {vpc_id}: {e}"
+
+def delete_subnet(resource_arn):
+    client = boto3.client('ec2')
+    subnet_id = resource_arn.split('/')[-1]
+
+    try:
+        # Delete the subnet
+        client.delete_subnet(SubnetId=subnet_id)
+        console.print(f"[green]Successfully deleted EC2 Subnet {subnet_id}[/green]")
+    except ClientError as e:
+        return f"Error deleting EC2 Subnet {subnet_id}: {e}"
+
+def delete_nat_gateway(resource_arn):
+    client = boto3.client('ec2')
+    nat_gateway_id = resource_arn.split('/')[-1]
+
+    try:
+        # Delete the NAT Gateway
+        client.delete_nat_gateway(NatGatewayId=nat_gateway_id)
+        console.print(f"[green]Successfully deleted EC2 NAT Gateway {nat_gateway_id}[/green]")
+    except ClientError as e:
+        return f"Error deleting EC2 NAT Gateway {nat_gateway_id}: {e}"
